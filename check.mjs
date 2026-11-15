@@ -53,12 +53,24 @@ const products = config.products.map((p) => ({
   keywords: p.keywords,
   mustMatch: p.mustMatch.map(norm),
   exclude: [...(config.excludeAll || []), ...(p.exclude || [])].map(norm),
+  lowExclude: [...(config.lowExcludeAll || []), ...(p.lowExclude || [])].map(norm),
   page: "https://jp.mercari.com/search?keyword=" + encodeURIComponent(p.keywords[0]) + "&status=on_sale",
 }));
 function isTarget(p, name) {
   const n = norm(name);
   if (p.exclude.some((x) => n.includes(x))) return false;
   return p.mustMatch.some((m) => n.includes(m));
+}
+// Lane TERMURAH is stricter: only a complete, unused item counts (boxed kit, motor still in its
+// blister). Photos can't be read, so this goes by what the seller states: the listing is marked
+// new/unused or its title says unbuilt / unopened / boxed, and the title has no loose-item word.
+const LOW_CONDITIONS = (config.lowConditionIds || ["1"]).map(String);
+const LOW_REQUIRE = (config.lowRequireAny || []).map(norm);
+function isLowTarget(p, it) {
+  if (it.price <= 0 || !isTarget(p, it.name)) return false;
+  const n = norm(it.name);
+  if (p.lowExclude.some((x) => n.includes(x))) return false;
+  return LOW_CONDITIONS.includes(it.cond) || LOW_REQUIRE.some((x) => n.includes(x));
 }
 
 // ---------- DPoP token (ES256 JWT that Mercari's API requires) ----------
@@ -112,6 +124,7 @@ async function searchMercari(keyword, sort, order, pageToken = "") {
       price: Number(it.price),
       url: shop ? `https://jp.mercari.com/shops/product/${it.id}` : `https://jp.mercari.com/item/${it.id}`,
       thumb: it.thumbnails && it.thumbnails[0],
+      cond: String(it.itemConditionId || ""), // "1" = new / unused
     };
   });
   return { items, next: (json.meta && json.meta.nextPageToken) || "" };
@@ -146,7 +159,7 @@ async function collectLows() {
       for (let page = 0; page < 3; page++) {
         const { items, next } = await searchMercari(kw, "SORT_PRICE", "ORDER_ASC", token);
         await sleep(300);
-        const hits = items.filter((it) => it.price > 0 && isTarget(p, it.name));
+        const hits = items.filter((it) => isLowTarget(p, it));
         if (hits.length) {
           const min = hits.reduce((a, b) => (b.price < a.price ? b : a));
           if (!best || min.price < best.price) best = min;
@@ -378,6 +391,18 @@ async function dryRun() {
         if (seen.has(it.id)) continue;
         seen.add(it.id);
         out += `${isTarget(p, it.name) ? "LOLOS  " : "DITOLAK"} ${rp(it.price, rate).padStart(13)}  ${it.name}\n`;
+      }
+    }
+  }
+  for (const p of products) {
+    const seen = new Set();
+    out += `\n===== Kandidat termurah (kit utuh / blister): ${p.name} =====\n`;
+    for (const kw of p.keywords) {
+      const { items } = await searchMercari(kw, "SORT_PRICE", "ORDER_ASC");
+      for (const it of items) {
+        if (seen.has(it.id) || !isTarget(p, it.name)) continue;
+        seen.add(it.id);
+        out += `${isLowTarget(p, it) ? "MASUK  " : "TIDAK  "} kondisi ${it.cond || "?"} ${rp(it.price, rate).padStart(13)}  ${it.name}\n`;
       }
     }
   }
