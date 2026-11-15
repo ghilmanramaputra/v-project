@@ -1,0 +1,35 @@
+# Goes to .github/workflows/v-project.yml in the GitHub repo.
+name: V-Project tracker
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (GitHub may start it late)
+  workflow_dispatch:          # "Run workflow" button for manual tests
+
+permissions:
+  contents: write             # needed to save state.json
+
+concurrency:
+  group: v-project
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # state.json is read and written through the GitHub API inside check.mjs,
+      # shared with the PC watcher so a listing is never notified twice
+      - name: Run check (3 times, 3 minutes apart)
+        run: node check.mjs
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECKS: 3
+          INTERVAL_SEC: 180
