@@ -19,7 +19,7 @@
     "バンプレスト", "ガチャ", "yujin", "ユージン", "国内盤", "dvd", "社外品"
   ],
   "tokopediaShops": [
-    { "name": "TQ RC", "domain": "tqrcolshop", "shopId": "2559146" }
+    { "name": "TQ RC", "domain": "tqrcolshop", "shopId": "2559146", "allProducts": true }
   ],
   "products": [
     {
