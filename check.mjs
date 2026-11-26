@@ -156,9 +156,11 @@ const TP_SHOPS = config.tokopediaShops || [];
 const TP_GQL = "https://gql.tokopedia.com/graphql/ShopProducts";
 const TP_QUERY = "query ShopProducts($sid: String!, $source: String, $page: Int, $perPage: Int, $keyword: String, $etalaseId: String, $sort: Int) { GetShopProduct(shopID: $sid, source: $source, filter: {page: $page, perPage: $perPage, fkeyword: $keyword, fmenu: $etalaseId, sort: $sort}) { totalData data { name product_url product_id price { text_idr } primary_image { resize300 } flags { isSold } } } }";
 
-async function searchTokopedia(shop, keyword) {
-  const body = [{ operationName: "ShopProducts", query: TP_QUERY,
-    variables: { source: "shop", sid: String(shop.shopId), page: 1, perPage: 40, keyword, etalaseId: "etalase", sort: 1 } }];
+// sort 1 = newest first. Without a keyword this is the shop's whole catalogue, newest first.
+async function searchTokopedia(shop, keyword = "") {
+  const variables = { source: "shop", sid: String(shop.shopId), page: 1, perPage: 40, etalaseId: "etalase", sort: 1 };
+  if (keyword) variables.keyword = keyword;
+  const body = [{ operationName: "ShopProducts", query: TP_QUERY, variables }];
   const res = await fetch(TP_GQL, {
     method: "POST",
     headers: {
@@ -173,26 +175,38 @@ async function searchTokopedia(shop, keyword) {
   const json = await res.json();
   const g = json && json[0] && json[0].data && json[0].data.GetShopProduct;
   if (!g) throw new Error(`Tokopedia: jawaban tidak dikenal ${JSON.stringify(json).slice(0, 150)}`);
-  return (g.data || []).filter((it) => !(it.flags && it.flags.isSold)).map((it) => ({
+  return (g.data || []).map((it) => ({
     id: "tp:" + it.product_id,
     name: it.name,
     idr: Number(String((it.price && it.price.text_idr) || "").replace(/\D/g, "")) || 0,
     url: it.product_url,
     thumb: it.primary_image && it.primary_image.resize300,
+    sold: !!(it.flags && it.flags.isSold),
     shop: shop.name,
+    shopKey: tpShopKey(shop),
   }));
 }
+// A shop's mode is part of its key, so switching a shop to allProducts records its catalogue anew
+// instead of reporting everything it already sells.
+const tpShopKey = (s) => s.domain + (s.allProducts ? ":all" : "");
+const tpMatches = (name) => products.filter((p) => isTarget(p, name)).map((p) => p.name);
 
 // Returns null when Tokopedia could not be read, so a failure never looks like "nothing new".
+// allProducts shops: every product on the newest page. Other shops: only target products.
 async function collectTokopedia() {
   if (!TP_SHOPS.length) return new Map();
   const byId = new Map();
   try {
     for (const shop of TP_SHOPS) {
+      if (shop.allProducts) {
+        for (const it of await searchTokopedia(shop)) byId.set(it.id, { ...it, products: tpMatches(it.name) });
+        await sleep(500);
+        continue;
+      }
       for (const p of products) {
         for (const kw of p.tpKeywords) {
           for (const it of await searchTokopedia(shop, kw)) {
-            if (!isTarget(p, it.name)) continue;
+            if (it.sold || !isTarget(p, it.name)) continue;
             const known = byId.get(it.id);
             if (known) { if (!known.products.includes(p.name)) known.products.push(p.name); }
             else byId.set(it.id, { ...it, products: [p.name] });
@@ -382,8 +396,8 @@ async function checkOnce() {
 
   // A Tokopedia shop seen for the first time: record what it already sells, notify nothing for it.
   const tpItems = tp ? [...tp.values()] : [];
-  const tpNewShops = tp ? TP_SHOPS.map((s) => s.domain).filter((d) => !state.tpShops.includes(d)) : [];
-  const tpSeed = tpItems.filter((i) => tpNewShops.includes(TP_SHOPS.find((s) => s.name === i.shop)?.domain));
+  const tpNewShops = tp ? TP_SHOPS.map(tpShopKey).filter((k) => !state.tpShops.includes(k)) : [];
+  const tpSeed = tpItems.filter((i) => tpNewShops.includes(i.shopKey));
   const markTp = (st) => {
     if (!tpNewShops.length) return;
     st.ids = addIds(st.ids, tpSeed.map((i) => i.id));
@@ -419,12 +433,25 @@ async function checkOnce() {
   }
   const seedIds = new Set(tpSeed.map((i) => i.id));
   const tpFresh = tpItems.filter((i) => !seen.has(i.id) && !seedIds.has(i.id));
-  for (const n of tpFresh) {
-    log(`BARU Tokopedia ${n.shop} [${n.products.join(" + ")}]: Rp ${dots(n.idr)} | ${n.name} | ${n.url}`);
+  // Target products always get their own urgent message. Other new products of an allProducts
+  // shop get one message each too, but a burst of more than TP_BATCH in one check is sent as one
+  // combined message per shop, so a big restock can't use up ntfy's daily message limit.
+  const TP_BATCH = Number(config.tokopediaBatchOver ?? 5);
+  const tpLine = (n) => `Rp ${dots(n.idr)}${n.sold ? " (stok habis)" : ""} | ${n.name}`;
+  const tpOne = (n) => notify({
+    title: n.products.length ? `BARU | Tokopedia ${n.shop} | ${n.products.join(" + ")}: Rp ${dots(n.idr)}` : `BARU | Tokopedia ${n.shop}: Rp ${dots(n.idr)}`,
+    message: n.name + (n.sold ? "\n(stok habis)" : ""),
+    url: n.url, image: n.thumb, tags: ["new", "shopping"], priority: n.products.length ? 5 : 3,
+  });
+  for (const n of tpFresh) log(`BARU Tokopedia ${n.shop}${n.products.length ? ` [${n.products.join(" + ")}]` : ""}: ${tpLine(n)} | ${n.url}`);
+  for (const n of tpFresh.filter((n) => n.products.length)) await tpOne(n);
+  for (const shop of TP_SHOPS) {
+    const rest = tpFresh.filter((n) => !n.products.length && n.shopKey === tpShopKey(shop));
+    if (rest.length <= TP_BATCH) { for (const n of rest) await tpOne(n); continue; }
     await notify({
-      title: `BARU | Tokopedia ${n.shop} | ${n.products.join(" + ")}: Rp ${dots(n.idr)}`,
-      message: n.name,
-      url: n.url, image: n.thumb, tags: ["new", "shopping"],
+      title: `BARU | Tokopedia ${shop.name}: ${rest.length} produk baru`,
+      message: rest.map(tpLine).join("\n").slice(0, 3800),
+      url: `https://www.tokopedia.com/${shop.domain}/product`, image: rest[0].thumb, tags: ["new", "shopping"], priority: 3,
     });
   }
   if (tpNewShops.length) log(`Toko Tokopedia baru dipantau: ${tpNewShops.join(", ")} (${tpSeed.length} listing yang sudah ada dicatat).`);
@@ -489,6 +516,16 @@ async function dryRun() {
     }
   }
   for (const shop of TP_SHOPS) {
+    if (shop.allProducts) {
+      out += `\n===== Tokopedia ${shop.name}: 40 produk terbaru (semua dilaporkan) =====\n`;
+      try {
+        for (const it of await searchTokopedia(shop)) {
+          const m = tpMatches(it.name);
+          out += `${m.length ? "TARGET " : "       "} ${("Rp " + dots(it.idr)).padStart(13)}${it.sold ? " (habis)" : ""}  ${it.id}  ${it.name}\n`;
+        }
+      } catch (e) { out += `GAGAL: ${e.message}\n`; }
+      continue;
+    }
     for (const p of products) {
       out += `\n===== Tokopedia ${shop.name}: ${p.name} =====\n`;
       const seen = new Set();
