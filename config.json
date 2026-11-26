@@ -18,25 +18,31 @@
     "えんぴつ", "鉛筆", "バトエン", "下敷き", "ノート", "ポーチ", "ペンケース", "筆箱", "定規", "付録",
     "バンプレスト", "ガチャ", "yujin", "ユージン", "国内盤", "dvd", "社外品"
   ],
+  "tokopediaShops": [
+    { "name": "TQ RC", "domain": "tqrcolshop", "shopId": "2559146" }
+  ],
   "products": [
     {
       "key": "vsonic",
       "name": "Vanguard Sonic",
       "keywords": ["バンガードソニック", "Vanguard Sonic"],
-      "mustMatch": ["バンガードソニック", "ヴァンガードソニック", "vanguardsonic", "vソニック"],
+      "tokopediaKeywords": ["vanguard sonic", "v sonic"],
+      "mustMatch": ["バンガードソニック", "ヴァンガードソニック", "vanguardsonic", "vソニック", "vsonic"],
       "exclude": ["プレミア", "premium", "19435", "カーボンスーパー", "スーパーii", "スーパー2", "カーボンsii", "sii", "ソニックノア", "ソニックシケイダ", "ソニックブレイカー", "たちかぜ"]
     },
     {
       "key": "vmagnum",
       "name": "Victory Magnum",
       "keywords": ["ビクトリーマグナム", "Victory Magnum"],
-      "mustMatch": ["ビクトリーマグナム", "ヴィクトリーマグナム", "victorymagnum", "vマグナム"],
+      "tokopediaKeywords": ["victory magnum", "v magnum"],
+      "mustMatch": ["ビクトリーマグナム", "ヴィクトリーマグナム", "victorymagnum", "vマグナム", "vmagnum"],
       "exclude": ["プレミア", "premium", "19433", "カーボンスーパー", "スーパーii", "スーパー2", "カーボンsii", "sii", "jetcar", "ジェットカー"]
     },
     {
       "key": "machdash",
       "name": "Mach Dash (single shaft)",
       "keywords": ["マッハダッシュ", "Mach Dash"],
+      "tokopediaKeywords": ["mach dash"],
       "mustMatch": ["マッハダッシュ", "マッハダシュ", "machdash"],
       "exclude": ["pro", "モータープロ", "ダッシュプロ", "両軸", "15433", "フレキ", "msシャーシ", "maシャーシ", "スニーカー", "靴", "オイル", "接点復活", "コンディショナー"]
     }
