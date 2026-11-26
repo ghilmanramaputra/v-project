@@ -51,6 +51,7 @@ const products = config.products.map((p) => ({
   key: p.key,
   name: p.name,
   keywords: p.keywords,
+  tpKeywords: p.tokopediaKeywords || [],
   mustMatch: p.mustMatch.map(norm),
   exclude: [...(config.excludeAll || []), ...(p.exclude || [])].map(norm),
   lowExclude: [...(config.lowExcludeAll || []), ...(p.lowExclude || [])].map(norm),
@@ -148,6 +149,65 @@ async function collectNewest() {
   return byId;
 }
 
+// ---------- Tokopedia shops (lane BARU only; prices are already in rupiah) ----------
+// Tokopedia's own web GraphQL, no login needed. Ids are stored as "tp:<product id>" in the same
+// state list as Mercari ids.
+const TP_SHOPS = config.tokopediaShops || [];
+const TP_GQL = "https://gql.tokopedia.com/graphql/ShopProducts";
+const TP_QUERY = "query ShopProducts($sid: String!, $source: String, $page: Int, $perPage: Int, $keyword: String, $etalaseId: String, $sort: Int) { GetShopProduct(shopID: $sid, source: $source, filter: {page: $page, perPage: $perPage, fkeyword: $keyword, fmenu: $etalaseId, sort: $sort}) { totalData data { name product_url product_id price { text_idr } primary_image { resize300 } flags { isSold } } } }";
+
+async function searchTokopedia(shop, keyword) {
+  const body = [{ operationName: "ShopProducts", query: TP_QUERY,
+    variables: { source: "shop", sid: String(shop.shopId), page: 1, perPage: 40, keyword, etalaseId: "etalase", sort: 1 } }];
+  const res = await fetch(TP_GQL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json", Accept: "*/*", "User-Agent": UA,
+      Origin: "https://www.tokopedia.com", Referer: `https://www.tokopedia.com/${shop.domain}/product`,
+      "X-Source": "tokopedia-lite", "X-Tkpd-Lite-Service": "zeus", "X-Device": "default_v3",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!res.ok) throw new Error(`Tokopedia HTTP ${res.status}`);
+  const json = await res.json();
+  const g = json && json[0] && json[0].data && json[0].data.GetShopProduct;
+  if (!g) throw new Error(`Tokopedia: jawaban tidak dikenal ${JSON.stringify(json).slice(0, 150)}`);
+  return (g.data || []).filter((it) => !(it.flags && it.flags.isSold)).map((it) => ({
+    id: "tp:" + it.product_id,
+    name: it.name,
+    idr: Number(String((it.price && it.price.text_idr) || "").replace(/\D/g, "")) || 0,
+    url: it.product_url,
+    thumb: it.primary_image && it.primary_image.resize300,
+    shop: shop.name,
+  }));
+}
+
+// Returns null when Tokopedia could not be read, so a failure never looks like "nothing new".
+async function collectTokopedia() {
+  if (!TP_SHOPS.length) return new Map();
+  const byId = new Map();
+  try {
+    for (const shop of TP_SHOPS) {
+      for (const p of products) {
+        for (const kw of p.tpKeywords) {
+          for (const it of await searchTokopedia(shop, kw)) {
+            if (!isTarget(p, it.name)) continue;
+            const known = byId.get(it.id);
+            if (known) { if (!known.products.includes(p.name)) known.products.push(p.name); }
+            else byId.set(it.id, { ...it, products: [p.name] });
+          }
+          await sleep(500);
+        }
+      }
+    }
+  } catch (e) {
+    log(`Tokopedia gagal dicek: ${e.message}`);
+    return null;
+  }
+  return byId;
+}
+
 // Lane TERMURAH: the cheapest on-sale listing of every product that passes its filter.
 // Results come cheapest first, so the first page holding a match holds the cheapest one.
 async function collectLows() {
@@ -237,7 +297,7 @@ const GH_URL = `https://api.github.com/repos/${REPO}/contents/${STATE_PATH}`;
 const ghHeaders = () => ({ Authorization: `Bearer ${ghToken}`, Accept: "application/vnd.github+json", "User-Agent": "v-project" });
 const parseState = (text) => {
   const s = JSON.parse(text.replace(/^\uFEFF/, ""));
-  return { ids: s.ids || null, fails: s.fails || 0, low: s.low || {}, lowHist: s.lowHist || {}, digestDate: s.digestDate || "", rate: s.rate || null };
+  return { ids: s.ids || null, fails: s.fails || 0, low: s.low || {}, lowHist: s.lowHist || {}, digestDate: s.digestDate || "", rate: s.rate || null, tpShops: s.tpShops || [] };
 };
 const emptyState = () => parseState("{}");
 
@@ -306,6 +366,7 @@ async function checkOnce() {
     return;
   }
   const items = [...newest.values()];
+  const tp = await collectTokopedia();
   const rateChanged = rate && rate.at && (!state.rate || state.rate.sell !== rate.sell || state.rate.asOf !== rate.asOf);
   const saveRate = (st) => { if (rateChanged) st.rate = { sell: rate.sell, asOf: rate.asOf }; };
   const saveLows = (st) => {
@@ -319,10 +380,20 @@ async function checkOnce() {
     }
   };
 
+  // A Tokopedia shop seen for the first time: record what it already sells, notify nothing for it.
+  const tpItems = tp ? [...tp.values()] : [];
+  const tpNewShops = tp ? TP_SHOPS.map((s) => s.domain).filter((d) => !state.tpShops.includes(d)) : [];
+  const tpSeed = tpItems.filter((i) => tpNewShops.includes(TP_SHOPS.find((s) => s.name === i.shop)?.domain));
+  const markTp = (st) => {
+    if (!tpNewShops.length) return;
+    st.ids = addIds(st.ids, tpSeed.map((i) => i.id));
+    st.tpShops = [...new Set([...(st.tpShops || []), ...tpNewShops])];
+  };
+
   // First run: record what is already on sale, notify nothing but a single "aktif" message.
   if (!state.ids) {
     await updateState((st) => {
-      st.ids = addIds(st.ids, items.map((i) => i.id)); st.fails = 0;
+      st.ids = addIds(st.ids, items.map((i) => i.id)); st.fails = 0; markTp(st);
       saveLows(st); saveRate(st);
       if (wibNow().getUTCHours() >= DIGEST_HOUR) st.digestDate = wibDate();
     });
@@ -346,6 +417,17 @@ async function checkOnce() {
       url: n.url, image: n.thumb, tags: ["new"],
     });
   }
+  const seedIds = new Set(tpSeed.map((i) => i.id));
+  const tpFresh = tpItems.filter((i) => !seen.has(i.id) && !seedIds.has(i.id));
+  for (const n of tpFresh) {
+    log(`BARU Tokopedia ${n.shop} [${n.products.join(" + ")}]: Rp ${dots(n.idr)} | ${n.name} | ${n.url}`);
+    await notify({
+      title: `BARU | Tokopedia ${n.shop} | ${n.products.join(" + ")}: Rp ${dots(n.idr)}`,
+      message: n.name,
+      url: n.url, image: n.thumb, tags: ["new", "shopping"],
+    });
+  }
+  if (tpNewShops.length) log(`Toko Tokopedia baru dipantau: ${tpNewShops.join(", ")} (${tpSeed.length} listing yang sudah ada dicatat).`);
 
   // Lane TERMURAH: cheaper than the cheapest known so far. A listing that was already the
   // cheapest once at this price (it only dropped out of the results for a moment) stays quiet.
@@ -368,14 +450,14 @@ async function checkOnce() {
   const digestDue = ARGS.has("--digest") || (wibNow().getUTCHours() >= DIGEST_HOUR && state.digestDate !== wibDate());
   if (digestDue) { await sendDigest(lows, rate); log("Rangkuman pagi dikirim."); }
 
-  if (fresh.length || lowChanged || digestDue || rateChanged || state.fails) {
+  if (fresh.length || tpFresh.length || tpNewShops.length || lowChanged || digestDue || rateChanged || state.fails) {
     await updateState((st) => {
-      st.ids = addIds(st.ids, fresh.map((n) => n.id)); st.fails = 0;
+      st.ids = addIds(st.ids, [...fresh, ...tpFresh].map((n) => n.id)); st.fails = 0; markTp(st);
       saveLows(st); saveRate(st);
       if (digestDue) st.digestDate = wibDate();
     });
   }
-  log(`OK: ${items.length} listing dicek, ${fresh.length} baru. Termurah: ${products.map((p) => lowLine(p, lows[p.key], rate)).join(" | ")}`);
+  log(`OK: ${items.length} listing dicek, ${fresh.length} baru; Tokopedia: ${tp ? `${tpItems.length} dicek, ${tpFresh.length} baru` : "gagal"}. Termurah: ${products.map((p) => lowLine(p, lows[p.key], rate)).join(" | ")}`);
 }
 
 // ---------- dry run: show what the filters accept and reject, send nothing ----------
@@ -404,6 +486,22 @@ async function dryRun() {
         seen.add(it.id);
         out += `${isLowTarget(p, it) ? "MASUK  " : "TIDAK  "} kondisi ${it.cond || "?"} ${rp(it.price, rate).padStart(13)}  ${it.name}\n`;
       }
+    }
+  }
+  for (const shop of TP_SHOPS) {
+    for (const p of products) {
+      out += `\n===== Tokopedia ${shop.name}: ${p.name} =====\n`;
+      const seen = new Set();
+      for (const kw of p.tpKeywords) {
+        try {
+          for (const it of await searchTokopedia(shop, kw)) {
+            if (seen.has(it.id)) continue;
+            seen.add(it.id);
+            out += `${isTarget(p, it.name) ? "LOLOS  " : "DITOLAK"} ${("Rp " + dots(it.idr)).padStart(13)}  ${it.name}\n`;
+          }
+        } catch (e) { out += `GAGAL (${kw}): ${e.message}\n`; }
+      }
+      if (!seen.size) out += "(tidak ada listing)\n";
     }
   }
   const lows = await collectLows();
