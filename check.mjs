@@ -36,6 +36,8 @@ function log(msg) {
 const config = process.env.WATCH_CONFIG
   ? JSON.parse(Buffer.from(process.env.WATCH_CONFIG.trim(), "base64").toString("utf8").replace(/^﻿/, ""))
   : readJson(join(DIR, "config.json"));
+// Public Actions logs: the runner replaces these words with *** wherever they would appear.
+if (ON_ACTIONS) for (const p of config.products) for (const v of [p.name, ...p.keywords, ...(p.tokopediaKeywords || []), ...p.mustMatch]) if (v && v.length > 3) console.log(`::add-mask::${v}`);
 const LOCAL_FILE = join(DIR, "local.json");
 const local = existsSync(LOCAL_FILE) ? readJson(LOCAL_FILE) : {};
 if (!ON_ACTIONS && !local.ntfyTopic && !process.env.NTFY_TOPIC) {
@@ -428,7 +430,7 @@ async function checkOnce() {
   const seen = new Set(state.ids);
   const fresh = items.filter((i) => !seen.has(i.id));
   for (const n of fresh) {
-    log(`BARU [${n.products.join(" + ")}]: ${n.price} yen | ${n.name} | ${n.url}`);
+    if (!ON_ACTIONS) log(`BARU [${n.products.join(" + ")}]: ${n.price} yen | ${n.name} | ${n.url}`);
     await notify({
       title: `BARU | ${n.products.join(" + ")}: ${rp(n.price, rate)}`,
       message: [n.name, rateLine(rate)].filter(Boolean).join("\n"),
@@ -447,7 +449,7 @@ async function checkOnce() {
     message: n.name + (n.sold ? "\n(stok habis)" : ""),
     url: n.url, image: n.thumb, tags: ["new", "shopping"], priority: n.products.length ? 5 : 3,
   });
-  for (const n of tpFresh) log(`BARU Tokopedia ${n.shop}${n.products.length ? ` [${n.products.join(" + ")}]` : ""}: ${tpLine(n)} | ${n.url}`);
+  if (!ON_ACTIONS) for (const n of tpFresh) log(`BARU Tokopedia ${n.shop}${n.products.length ? ` [${n.products.join(" + ")}]` : ""}: ${tpLine(n)} | ${n.url}`);
   for (const n of tpFresh.filter((n) => n.products.length)) await tpOne(n);
   for (const shop of TP_SHOPS) {
     const rest = tpFresh.filter((n) => !n.products.length && n.shopKey === tpShopKey(shop));
@@ -469,7 +471,7 @@ async function checkOnce() {
     if (!low || !prev || low.price >= prev.price) continue;
     const before = (state.lowHist[p.key] || {})[low.id];
     if (before !== undefined && before <= low.price) continue;
-    log(`TERMURAH [${p.name}]: ${low.price} yen (sebelumnya ${prev.price}) | ${low.name} | ${low.url}`);
+    if (!ON_ACTIONS) log(`TERMURAH [${p.name}]: ${low.price} yen (sebelumnya ${prev.price}) | ${low.name} | ${low.url}`);
     await notify({
       title: `TERMURAH | ${p.name}: ${rp(low.price, rate)}`,
       message: [low.name, `Termurah sebelumnya: ${rp(prev.price, rate)}`, rateLine(rate)].filter(Boolean).join("\n"),
@@ -488,7 +490,7 @@ async function checkOnce() {
       if (digestDue) st.digestDate = wibDate();
     });
   }
-  log(`OK: ${items.length} listing dicek, ${fresh.length} baru; Tokopedia: ${tp ? `${tpItems.length} dicek, ${tpFresh.length} baru` : "gagal"}. Termurah: ${products.map((p) => lowLine(p, lows[p.key], rate)).join(" | ")}`);
+  log(`OK: ${items.length} listing dicek, ${fresh.length} baru; Tokopedia: ${tp ? `${tpItems.length} dicek, ${tpFresh.length} baru` : "gagal"}. Termurah: ${products.map((p) => (ON_ACTIONS ? `${p.key}: ${lows[p.key] ? rp(lows[p.key].price, rate) : "-"}` : lowLine(p, lows[p.key], rate))).join(" | ")}`);
 }
 
 // ---------- dry run: show what the filters accept and reject, send nothing ----------
