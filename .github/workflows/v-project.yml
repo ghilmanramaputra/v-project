@@ -30,6 +30,7 @@ jobs:
         run: node check.mjs
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          WATCH_CONFIG: ${{ secrets.WATCH_CONFIG }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHECKS: 3
           INTERVAL_SEC: 180
