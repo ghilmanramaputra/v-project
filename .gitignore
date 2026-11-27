@@ -1,4 +1,5 @@
 local.json
+config.json
 state.json
 watcher.log
 dryrun.txt
