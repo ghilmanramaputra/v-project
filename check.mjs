@@ -1,16 +1,18 @@
-// V-Project: Mercari JP watcher for Tamiya Vanguard Sonic, Victory Magnum (non-Premium) and the
-// single-shaft Mach Dash motor. Node 22, no dependencies. The same file runs on GitHub Actions
-// and on the Windows PC; both share one state file in the GitHub repo so a listing is notified once.
+// V-Project: scheduled listing checker. Node 22, no dependencies. The same file runs on GitHub
+// Actions and on the Windows PC; both share one state file in the GitHub repo so a listing is
+// notified once.
 //
 // Two lanes, both pushed to the ntfy app with prices in rupiah (BCA bank notes selling rate):
 //   BARU      - every new listing that passes the title filter
 //   TERMURAH  - a listing cheaper than the cheapest one known so far, per product,
 //               plus one summary per product every morning (digestHourWib in config.json)
 //
-// Products and filters: config.json. PC-only settings (ntfy topic, repo, loop): local.json.
+// Products and filters are not in this repo: on GitHub Actions they come from the WATCH_CONFIG
+// secret (base64 of config.json), on the PC from a local config.json (not committed).
+// PC-only settings (ntfy topic, repo, loop): local.json.
 // Flags: --once (single check)  --dry (show filter verdicts, send nothing)
 //        --test-phone (send a test notification)  --digest (send the morning summary now)
-// Env on GitHub Actions: NTFY_TOPIC, GITHUB_TOKEN, GITHUB_REPOSITORY, CHECKS, INTERVAL_SEC
+// Env on GitHub Actions: NTFY_TOPIC, WATCH_CONFIG, GITHUB_TOKEN, GITHUB_REPOSITORY, CHECKS, INTERVAL_SEC
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "node:fs";
 import { execFileSync, execFile } from "node:child_process";
@@ -31,7 +33,9 @@ function log(msg) {
 }
 
 // ---------- settings ----------
-const config = readJson(join(DIR, "config.json"));
+const config = process.env.WATCH_CONFIG
+  ? JSON.parse(Buffer.from(process.env.WATCH_CONFIG.trim(), "base64").toString("utf8").replace(/^﻿/, ""))
+  : readJson(join(DIR, "config.json"));
 const LOCAL_FILE = join(DIR, "local.json");
 const local = existsSync(LOCAL_FILE) ? readJson(LOCAL_FILE) : {};
 if (!ON_ACTIONS && !local.ntfyTopic && !process.env.NTFY_TOPIC) {
@@ -62,9 +66,9 @@ function isTarget(p, name) {
   if (p.exclude.some((x) => n.includes(x))) return false;
   return p.mustMatch.some((m) => n.includes(m));
 }
-// Lane TERMURAH is stricter: only a complete, unused item counts (boxed kit, motor still in its
-// blister). Photos can't be read, so this goes by what the seller states: the listing is marked
-// new/unused or its title says unbuilt / unopened / boxed, and the title has no loose-item word.
+// Lane TERMURAH is stricter: only a complete, unused item counts. Photos can't be read, so this
+// goes by what the seller states: the listing is marked new/unused or its title has a lowRequireAny
+// word, and the title has no lowExclude word.
 const LOW_CONDITIONS = (config.lowConditionIds || ["1"]).map(String);
 const LOW_REQUIRE = (config.lowRequireAny || []).map(norm);
 function isLowTarget(p, it) {
@@ -505,7 +509,7 @@ async function dryRun() {
   }
   for (const p of products) {
     const seen = new Set();
-    out += `\n===== Kandidat termurah (kit utuh / blister): ${p.name} =====\n`;
+    out += `\n===== Kandidat termurah (barang utuh): ${p.name} =====\n`;
     for (const kw of p.keywords) {
       const { items } = await searchMercari(kw, "SORT_PRICE", "ORDER_ASC");
       for (const it of items) {
