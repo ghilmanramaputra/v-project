@@ -254,10 +254,15 @@ async function collectLows() {
   return lows;
 }
 
-// ---------- BCA bank notes selling rate (rupiah per 1 yen) ----------
-let rateCache = null; // { sell, asOf, at }
+// ---------- rupiah rate (rupiah per 1 yen) ----------
+// Every price is always shown in rupiah. Rate sources, in this order:
+//   1. BCA bank notes selling rate (3 attempts)   2. last BCA rate stored in the state file
+//   3. market mid rate (open.er-api.com, then frankfurter)   4. FALLBACK_RATE
+// rateLine() says which one was used.
+const FALLBACK_RATE = 116;
+let rateCache = null; // { sell, asOf, at, src: "bca" | "stored" | "market" | "fixed" }
 async function fetchBcaRate() {
-  const res = await fetch("https://www.bca.co.id/id/informasi/kurs", { headers: { "User-Agent": UA, "Accept-Language": "id" } });
+  const res = await fetch("https://www.bca.co.id/id/informasi/kurs", { headers: { "User-Agent": UA, "Accept-Language": "id" }, signal: AbortSignal.timeout(20000) });
   if (!res.ok) throw new Error(`BCA HTTP ${res.status}`);
   const html = await res.text();
   const row = html.match(/<tr[^>]*code="JPY"[\s\S]*?rate-type="BankNotes-sell">\s*<p>\s*([\d.,]+)\s*<\/p>/);
@@ -268,21 +273,44 @@ async function fetchBcaRate() {
   return { sell, asOf: when ? when[1].trim() : "" };
 }
 
-// Fresh rate at most once an hour; if BCA can't be reached the last known rate is used.
-async function getRate(state) {
-  if (rateCache && Date.now() - rateCache.at < 3600 * 1000) return rateCache;
-  try {
-    rateCache = { ...(await fetchBcaRate()), at: Date.now() };
-  } catch (e) {
-    log(`Kurs BCA gagal diambil: ${e.message}`);
-    if (!rateCache && state.rate) rateCache = { ...state.rate, at: 0 };
+async function fetchMarketRate() {
+  for (const url of ["https://open.er-api.com/v6/latest/JPY", "https://api.frankfurter.dev/v1/latest?base=JPY&symbols=IDR"]) {
+    try {
+      const r = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(15000) });
+      const v = r.ok ? Number(((await r.json()).rates || {}).IDR) : 0;
+      if (v > 20 && v < 1000) return Math.round(v * 100) / 100;
+    } catch {}
   }
-  return rateCache;
+  return 0;
+}
+
+// A BCA rate is reused for an hour. Without one, BCA is tried again on every check.
+async function getRate(state) {
+  if (rateCache && rateCache.src === "bca" && Date.now() - rateCache.at < 3600 * 1000) return rateCache;
+  let err = "";
+  for (let i = 0; i < 3; i++) {
+    try { return (rateCache = { ...(await fetchBcaRate()), at: Date.now(), src: "bca" }); }
+    catch (e) { err = e.message; if (i < 2) await sleep(3000); }
+  }
+  log(`Kurs BCA gagal diambil 3x: ${err}`);
+  if (rateCache && rateCache.src === "bca") return rateCache; // older BCA rate read by this process
+  if (state && state.rate && state.rate.sell > 0) return (rateCache = { sell: state.rate.sell, asOf: state.rate.asOf || "", at: 0, src: "stored" });
+  const mid = await fetchMarketRate();
+  if (mid) return (rateCache = { sell: mid, asOf: "", at: 0, src: "market" });
+  return (rateCache = { sell: Number(config.fallbackRate) || FALLBACK_RATE, asOf: "", at: 0, src: "fixed" });
 }
 
 const dots = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-const rp = (yen, rate) => (rate ? `Rp ${dots(yen * rate.sell)}` : `${dots(yen)} yen (kurs BCA belum terbaca)`);
-const rateLine = (rate) => (rate ? `Kurs jual bank notes BCA: Rp ${String(rate.sell).replace(".", ",")}/yen${rate.asOf ? ` (${rate.asOf})` : ""}` : "");
+const rp = (yen, rate) => `Rp ${dots(yen * (rate ? rate.sell : Number(config.fallbackRate) || FALLBACK_RATE))}`;
+function rateLine(rate) {
+  const v = (n) => `Rp ${String(n).replace(".", ",")}/yen`;
+  if (!rate) return `Kurs perkiraan ${v(Number(config.fallbackRate) || FALLBACK_RATE)} (kurs tidak terbaca)`;
+  const when = rate.asOf ? ` (${rate.asOf})` : "";
+  if (rate.src === "stored") return `Kurs jual bank notes BCA tersimpan: ${v(rate.sell)}${when}, situs BCA sedang tidak bisa diakses`;
+  if (rate.src === "market") return `Kurs pasar ${v(rate.sell)} (cadangan, situs BCA sedang tidak bisa diakses)`;
+  if (rate.src === "fixed") return `Kurs perkiraan ${v(rate.sell)} (situs BCA dan kurs cadangan sedang tidak bisa diakses)`;
+  return `Kurs jual bank notes BCA: ${v(rate.sell)}${when}`;
+}
 
 // ---------- notifications ----------
 function toast(title, message, url, image) {
