@@ -80,6 +80,31 @@ function isLowTarget(p, it) {
   return LOW_CONDITIONS.includes(it.cond) || LOW_REQUIRE.some((x) => n.includes(x));
 }
 
+// ---------- polite requests ----------
+// Never burst a site. Requests to one host are at least 1.5-3 s apart, and an HTTP 429 or 403
+// ("too many requests" / "refused") puts that host on a cooldown: 30 minutes, doubling up to
+// 6 hours, during which it is not contacted at all. A good answer resets the cooldown.
+const hosts = new Map(); // host -> { last, until, backoff }
+class Cooldown extends Error {}
+const hhmmWib = (t) => new Date(t + 7 * 3600 * 1000).toISOString().slice(11, 16) + " WIB";
+async function politeFetch(url, init = {}) {
+  const host = new URL(url).host;
+  const h = hosts.get(host) || { last: 0, until: 0, backoff: 0 };
+  hosts.set(host, h);
+  if (Date.now() < h.until) throw new Cooldown(`${host} sedang dijeda sampai ${hhmmWib(h.until)}`);
+  const wait = h.last + 1500 + Math.random() * 1500 - Date.now();
+  if (wait > 0) await sleep(wait);
+  h.last = Date.now();
+  const res = await fetch(url, init);
+  if (res.status === 429 || res.status === 403) {
+    h.backoff = Math.min(h.backoff ? h.backoff * 2 : 30 * 60000, 6 * 3600000);
+    h.until = Date.now() + h.backoff;
+    throw new Cooldown(`${host} membalas HTTP ${res.status}; dijeda ${Math.round(h.backoff / 60000)} menit sampai ${hhmmWib(h.until)}`);
+  }
+  if (res.ok) h.backoff = 0;
+  return res;
+}
+
 // ---------- DPoP token (ES256 JWT that Mercari's API requires) ----------
 const MERCARI_API = "https://api.mercari.jp/v2/entities:search";
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
@@ -110,7 +135,7 @@ async function searchMercari(keyword, sort, order, pageToken = "") {
     defaultDatasets: ["DATASET_TYPE_MERCARI", "DATASET_TYPE_BEYOND"], serviceFrom: "suruga",
     withItemBrand: true, withItemSize: false, withItemPromotions: true, withItemSizes: true, withShopname: false,
   };
-  const res = await fetch(MERCARI_API, {
+  const res = await politeFetch(MERCARI_API, {
     method: "POST",
     headers: {
       DPoP: await makeDpop(MERCARI_API, "POST"),
@@ -167,7 +192,7 @@ async function searchTokopedia(shop, keyword = "") {
   const variables = { source: "shop", sid: String(shop.shopId), page: 1, perPage: 40, etalaseId: "etalase", sort: 1 };
   if (keyword) variables.keyword = keyword;
   const body = [{ operationName: "ShopProducts", query: TP_QUERY, variables }];
-  const res = await fetch(TP_GQL, {
+  const res = await politeFetch(TP_GQL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json", Accept: "*/*", "User-Agent": UA,
@@ -408,6 +433,7 @@ async function checkOnce() {
     newest = await collectNewest();
     lows = await collectLows();
   } catch (e) {
+    if (e instanceof Cooldown) { log(`Dilewati: ${e.message}`); return; } // our own pause, not a failure
     const s = await updateState((st) => { st.fails += 1; });
     log(`GAGAL (${s.fails}x berturut-turut): ${e.message}`);
     if (s.fails === 5) await notify({ title: "V-Project bermasalah", message: `5x gagal berturut-turut: ${e.message}`, url: products[0].page, tags: ["rotating_light"] });
