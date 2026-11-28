@@ -96,14 +96,30 @@ async function politeFetch(url, init = {}) {
   if (wait > 0) await sleep(wait);
   h.last = Date.now();
   const res = await fetch(url, init);
+  const label = SITE_LABELS[host] || host, where = ON_ACTIONS ? "GitHub" : "PC";
   if (res.status === 429 || res.status === 403) {
     h.backoff = Math.min(h.backoff ? h.backoff * 2 : 30 * 60000, 6 * 3600000);
     h.until = Date.now() + h.backoff;
+    if (!h.alerted) {
+      h.alerted = true;
+      await notify({
+        title: `V-Project: IP dibatasi oleh ${label} (${where})`,
+        message: `${label} membalas HTTP ${res.status} (terlalu banyak permintaan).\nWatcher berhenti menghubungi ${label} sampai ${hhmmWib(h.until)}, lalu mencoba lagi sekali. Notif listing dari situs ini tertunda selama jeda.`,
+        tags: ["warning"], priority: 3,
+      });
+    }
     throw new Cooldown(`${host} membalas HTTP ${res.status}; dijeda ${Math.round(h.backoff / 60000)} menit sampai ${hhmmWib(h.until)}`);
   }
-  if (res.ok) h.backoff = 0;
+  if (res.ok) {
+    h.backoff = 0;
+    if (h.alerted) {
+      h.alerted = false;
+      await notify({ title: `V-Project: ${label} bisa diakses lagi (${where})`, message: "Pencarian berjalan normal lagi.", tags: ["white_check_mark"], priority: 3 });
+    }
+  }
   return res;
 }
+const SITE_LABELS = { "api.mercari.jp": "Mercari", "gql.tokopedia.com": "Tokopedia" };
 
 // ---------- DPoP token (ES256 JWT that Mercari's API requires) ----------
 const MERCARI_API = "https://api.mercari.jp/v2/entities:search";
